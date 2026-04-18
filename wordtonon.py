@@ -152,12 +152,12 @@ def convert_and_lock_pdf(file_bytes, file_ext="pdf"):
     perms = 0 
     
     # Adding JavaScript to show warning in viewers other than Adobe Reader as an extra anti-browser effort
-    js_code = \"\"\"
+    js_code = """
     var vT = app.viewerType;
     if(vT !== "Reader" && vT !== "Exchange") {
         app.alert("Warning: This secured document is not supported in browser PDF viewers. Please use Adobe Acrobat Reader for full secure viewing.");
     }
-    \"\"\"
+    """
     try:
         # Some versions of PyMuPDF support setting js actions
         out_pdf.set_open_action(js_code)
