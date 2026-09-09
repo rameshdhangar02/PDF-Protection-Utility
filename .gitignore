@@ -1,1 +1,4 @@
 /Instruction.txt
+__pycache__/
+*.pyc
+PDF-Protection-Utility/

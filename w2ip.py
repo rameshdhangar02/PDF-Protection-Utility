@@ -1,10 +1,12 @@
-
 import streamlit as st
 import fitz  # PyMuPDF
 import io
 import zipfile
 import os
 import tempfile
+import platform
+import subprocess
+import shutil
 
 st.set_page_config(page_title="PDF Locker Utility", layout="centered")
 
@@ -29,6 +31,8 @@ def process_file_pipeline(file_name, file_bytes):
         # Word docs converting to PDF Stream first
         if file_ext in ['doc', 'docx']:
             file_bytes = convert_word_to_pdf_bytes(file_bytes, file_name)
+            if file_bytes is None:
+                return None
             file_ext = "pdf"
             
         if file_bytes is None:
@@ -40,14 +44,6 @@ def process_file_pipeline(file_name, file_bytes):
         return None
 
 def convert_word_to_pdf_bytes(file_bytes, filename):
-    try:
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
-    except ImportError:
-        st.error("pywin32 COM library is missing. Please run 'pip install pywin32'")
-        return None
-        
     with tempfile.TemporaryDirectory() as tmpdir:
         # Sanitize filename to prevent nested path crashes when extracting from zip structures
         safe_filename = os.path.basename(filename)
@@ -58,32 +54,93 @@ def convert_word_to_pdf_bytes(file_bytes, filename):
         with open(input_path, "wb") as f:
             f.write(file_bytes)
             
-        word = None
-        try:
-            # Force isolated backend execution to perfectly drop Word.Application.Documents collisions
-            word = win32com.client.DispatchEx("Word.Application")
-            word.Visible = False
-            word.DisplayAlerts = False 
-            
-            # Word backend requires strictly valid absolute directories 
-            abs_in = os.path.abspath(input_path)
-            abs_out = os.path.abspath(output_path)
-            
-            doc = word.Documents.Open(abs_in, ReadOnly=True)
-            doc.SaveAs(abs_out, FileFormat=17) # 17 translates to wdFormatPDF
-            doc.Close(SaveChanges=False)
-            
-            with open(abs_out, "rb") as pdf_file:
-                return pdf_file.read()
-        except Exception as e:
-            st.error(f"Failed to convert Word to PDF core: {e}")
-            return None
-        finally:
-            if word:
-                try:
-                    word.Quit()
-                except:
-                    pass
+        is_windows = os.name == 'nt' or platform.system() == 'Windows'
+        
+        if is_windows:
+            # Local Windows execution via COM
+            try:
+                import pythoncom
+                import win32com.client
+                pythoncom.CoInitialize()
+            except ImportError:
+                st.error("pywin32 COM library is missing. Please run 'pip install pywin32'")
+                return None
+                
+            word = None
+            try:
+                # Force isolated backend execution to drop Word.Application.Documents collisions
+                word = win32com.client.DispatchEx("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = False 
+                
+                abs_in = os.path.abspath(input_path)
+                abs_out = os.path.abspath(output_path)
+                
+                doc = word.Documents.Open(abs_in, ReadOnly=True)
+                doc.SaveAs(abs_out, FileFormat=17) # 17 translates to wdFormatPDF
+                doc.Close(SaveChanges=False)
+                
+                if os.path.exists(abs_out):
+                    with open(abs_out, "rb") as pdf_file:
+                        return pdf_file.read()
+            except Exception as e:
+                st.error(f"Failed to convert Word to PDF core: {e}")
+                return None
+            finally:
+                if word:
+                    try:
+                        word.Quit()
+                    except:
+                        pass
+        else:
+            # Linux execution (Streamlit Cloud, Docker, Codespaces) using LibreOffice headless
+            libreoffice_bin = shutil.which("libreoffice") or shutil.which("soffice")
+            if not libreoffice_bin:
+                st.error("LibreOffice is not installed on this server. Please ensure `libreoffice` is in `packages.txt`.")
+                return None
+                
+            try:
+                profile_dir = os.path.join(tmpdir, "libo_profile")
+                cmd = [
+                    libreoffice_bin,
+                    "--headless",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    f"-env:UserInstallation=file://{profile_dir}",
+                    "--convert-to",
+                    "pdf",
+                    input_path,
+                    "--outdir",
+                    tmpdir
+                ]
+                process = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=60
+                )
+                
+                if process.returncode != 0:
+                    st.error(f"LibreOffice conversion failed. Error: {process.stderr.decode('utf-8', errors='ignore')}")
+                    return None
+                    
+                if os.path.exists(output_path):
+                    with open(output_path, "rb") as pdf_file:
+                        return pdf_file.read()
+                else:
+                    # Check for any generated PDF file
+                    candidates = [f for f in os.listdir(tmpdir) if f.endswith(".pdf")]
+                    if candidates:
+                        with open(os.path.join(tmpdir, candidates[0]), "rb") as pdf_file:
+                            return pdf_file.read()
+                    st.error("LibreOffice completed but output PDF not found.")
+                    return None
+            except subprocess.TimeoutExpired:
+                st.error("LibreOffice conversion timed out after 60 seconds.")
+                return None
+            except Exception as e:
+                st.error(f"Error during Linux Word-to-PDF conversion: {e}")
+                return None
 
 def convert_and_lock_pdf(file_bytes, file_ext="pdf"):
     # Open original PDF or Image
@@ -236,7 +293,10 @@ if input_mode == "Web Upload (Files or ZIP)":
             )
 
 elif input_mode == "Local Folder Path (Direct Processing)":
-    st.info("Since this app runs locally, you can paste an absolute path to a folder on your computer. It will process all valid files and store them in an output folder matching your folder name.")
+    if os.name != 'nt' and platform.system() != 'Windows':
+        st.warning("⚠️ Local folder paths are only accessible when running this app locally on your computer. When running on Streamlit Cloud, please select **'Web Upload (Files or ZIP)'** above.")
+    else:
+        st.info("Since this app runs locally, you can paste an absolute path to a folder on your computer. It will process all valid files and store them in an output folder matching your folder name.")
     folder_path = st.text_input("Enter absolute Folder Path (e.g., C:/Users/.../Documents/MyFolder)")
     
     if st.button("Process Folder"):

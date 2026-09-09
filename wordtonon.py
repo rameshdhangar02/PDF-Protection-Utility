@@ -6,6 +6,7 @@ import os
 import tempfile
 import platform
 import subprocess
+import shutil
 
 st.set_page_config(page_title="PDF Locker Utility", layout="centered")
 
@@ -88,35 +89,48 @@ def convert_word_to_pdf_bytes(file_bytes, filename):
                         pass
         else:
             # Linux execution using libreoffice headless
+            libreoffice_bin = shutil.which("libreoffice") or shutil.which("soffice")
+            if not libreoffice_bin:
+                st.error("LibreOffice is not installed on this server. Please ensure `libreoffice` is in `packages.txt`.")
+                return None
+                
             try:
-                # Command: libreoffice --headless --convert-to pdf <input_file> --outdir <output_dir>
-                # Streamlit usually aliases to 'libreoffice' or 'soffice'
+                profile_dir = os.path.join(tmpdir, "libo_profile")
+                cmd = [
+                    libreoffice_bin,
+                    "--headless",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    f"-env:UserInstallation=file://{profile_dir}",
+                    "--convert-to",
+                    "pdf",
+                    input_path,
+                    "--outdir",
+                    tmpdir
+                ]
                 process = subprocess.run(
-                    ["libreoffice", "--headless", "--nologo", "--nofirststartwizard", "--convert-to", "pdf", input_path, "--outdir", tmpdir],
+                    cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    stderr=subprocess.PIPE,
+                    timeout=60
                 )
                 
                 if process.returncode != 0:
-                    # Some Linux distros use 'soffice'
-                    process = subprocess.run(
-                        ["soffice", "--headless", "--nologo", "--nofirststartwizard", "--convert-to", "pdf", input_path, "--outdir", tmpdir],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                
-                if process.returncode != 0:
-                    st.error(f"LibreOffice conversion failed. Error: {process.stderr.decode('utf-8')}")
+                    st.error(f"LibreOffice conversion failed. Error: {process.stderr.decode('utf-8', errors='ignore')}")
                     return None
                     
                 if os.path.exists(output_path):
                     with open(output_path, "rb") as pdf_file:
                         return pdf_file.read()
                 else:
+                    candidates = [f for f in os.listdir(tmpdir) if f.endswith(".pdf")]
+                    if candidates:
+                        with open(os.path.join(tmpdir, candidates[0]), "rb") as pdf_file:
+                            return pdf_file.read()
                     st.error("LibreOffice completed but output PDF not found.")
                     return None
-            except FileNotFoundError:
-                st.error("LibreOffice is not installed on this system. Make sure you added `libreoffice` to your `packages.txt` file on Streamlit Cloud.")
+            except subprocess.TimeoutExpired:
+                st.error("LibreOffice conversion timed out after 60 seconds.")
                 return None
             except Exception as e:
                 st.error(f"Error during Linux Word-to-PDF conversion: {e}")
